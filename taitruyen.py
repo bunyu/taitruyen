@@ -287,6 +287,10 @@ CSS = """body{font-family:serif;line-height:1.6;margin:0 4%;}
 h1{font-size:1.4em;text-align:center;margin:1.5em 0 1em;}
 p{text-indent:1.5em;margin:0 0 .6em;text-align:justify;}
 .title-page{text-align:center;margin-top:30%;}
+.toc ol{list-style:none;padding:0;margin:0;}
+.toc li{margin:0 0 .45em;padding-bottom:.3em;border-bottom:1px dotted #aaa;}
+.toc a{text-decoration:none;}
+.back{text-indent:0;text-align:center;margin-top:2em;font-size:.9em;}
 .title-page h1{font-size:2em;} .title-page p{text-indent:0;text-align:center;}
 """
 
@@ -328,22 +332,28 @@ def write_epub(path, title, author, chapters, lang="vi", source=None):
                     '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
                     '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
                     '<item id="title" href="title.xhtml" media-type="application/xhtml+xml"/>']
-        spine = ['<itemref idref="title"/>']
+        spine = ['<itemref idref="title"/>', '<itemref idref="nav"/>']
         nav_items, ncx_points = [], []
 
         for i, ch in enumerate(chapters, 1):
             fn = f"chap{i:05d}.xhtml"
             body = f"<h1>{e(ch['title'])}</h1>\n" + "\n".join(f"<p>{e(p)}</p>" for p in ch["paragraphs"])
+            body += f'\n<p class="back"><a href="nav.xhtml#c{i}">↑ Mục lục</a></p>'
             z.writestr(f"OEBPS/{fn}", xhtml(ch["title"], body, lang), compress_type=zc)
             manifest.append(f'<item id="c{i}" href="{fn}" media-type="application/xhtml+xml"/>')
             spine.append(f'<itemref idref="c{i}"/>')
-            nav_items.append(f'<li><a href="{fn}">{e(ch["title"])}</a></li>')
-            ncx_points.append(f'<navPoint id="np{i}" playOrder="{i}"><navLabel><text>{e(ch["title"])}</text></navLabel>'
+            nav_items.append(f'<li id="c{i}"><a href="{fn}">{e(ch["title"])}</a></li>')
+            ncx_points.append(f'<navPoint id="np{i}" playOrder="{i + 1}"><navLabel><text>{e(ch["title"])}</text></navLabel>'
                               f'<content src="{fn}"/></navPoint>')
 
-        z.writestr("OEBPS/nav.xhtml", xhtml("Mục lục", f"""<nav epub:type="toc" id="toc"><h1>Mục lục</h1>
+        z.writestr("OEBPS/nav.xhtml", xhtml("Mục lục", f"""<nav epub:type="toc" id="toc" class="toc"><h1>Mục lục</h1>
 <ol>
 {chr(10).join(nav_items)}
+</ol></nav>
+<nav epub:type="landmarks" id="landmarks" hidden="hidden"><ol>
+<li><a epub:type="titlepage" href="title.xhtml">{e(title)}</a></li>
+<li><a epub:type="toc" href="nav.xhtml">Mục lục</a></li>
+<li><a epub:type="bodymatter" href="chap00001.xhtml">{e(chapters[0]["title"])}</a></li>
 </ol></nav>""", lang), compress_type=zc)
 
         z.writestr("OEBPS/toc.ncx", f"""<?xml version="1.0" encoding="utf-8"?>
@@ -352,6 +362,7 @@ def write_epub(path, title, author, chapters, lang="vi", source=None):
 <meta name="dtb:totalPageCount" content="0"/><meta name="dtb:maxPageNumber" content="0"/></head>
 <docTitle><text>{e(title)}</text></docTitle>
 <navMap>
+<navPoint id="np0" playOrder="1"><navLabel><text>Mục lục</text></navLabel><content src="nav.xhtml"/></navPoint>
 {chr(10).join(ncx_points)}
 </navMap>
 </ncx>""", compress_type=zc)
@@ -371,6 +382,11 @@ def write_epub(path, title, author, chapters, lang="vi", source=None):
 <spine toc="ncx">
 {chr(10).join(spine)}
 </spine>
+<guide>
+<reference type="title-page" title="{e(title)}" href="title.xhtml"/>
+<reference type="toc" title="Mục lục" href="nav.xhtml"/>
+<reference type="text" title="{e(chapters[0]["title"])}" href="chap00001.xhtml"/>
+</guide>
 </package>""", compress_type=zc)
 
 

@@ -19,6 +19,9 @@ python taitruyen.py https://www.tvtruyen.space/tu-tien-khi-nguoi-lam-mot-viec-de
 The script starts at the given chapter, follows the "Chương sau" (next chapter) link until
 the last chapter, then writes `<ten-truyen>.epub`.
 
+The ebook contains a title page, a **Mục lục** (chapter list) page with a link to every
+chapter, and then the chapters. Each chapter ends with an "↑ Mục lục" link back to the list.
+
 | Option | Meaning |
 |---|---|
 | `-o FILE.epub` | output file name |
