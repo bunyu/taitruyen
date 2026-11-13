@@ -1,0 +1,3 @@
+.cache/
+*.epub
+__pycache__/
