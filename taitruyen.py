@@ -310,7 +310,8 @@ def xhtml(title, body, lang):
 
 def write_epub(path, title, author, chapters, lang="vi", source=None):
     e = html.escape
-    book_id = "urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, source or title))
+    # The title is part of the id so that the parts of a split book get different ids
+    book_id = "urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source or ''}|{title}"))
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     author = author or "Unknown"
 
@@ -399,6 +400,44 @@ def slugify(s):
     return re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-").lower() or "novel"
 
 
+CLOSING_RE = re.compile(r"""^[.!?…,]*[”"’'»)\]]+$""")
+
+
+def norm(s):
+    """Normalise text for keyword matching (Vietnamese accents can be encoded two ways)."""
+    return unicodedata.normalize("NFC", s).casefold()
+
+
+def load_ignore(path):
+    """Read keywords from the ignore file: one per line, blank lines and '#' lines skipped."""
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    return [norm(clean_text(l)) for l in lines if l.strip() and not l.lstrip().startswith("#")]
+
+
+def drop_ignored(paragraphs, keywords):
+    """Split paragraphs into (kept, dropped): dropped ones contain at least one keyword."""
+    if not keywords:
+        return paragraphs, []
+    kept, dropped = [], []
+    after_drop = False
+    for p in paragraphs:
+        n = norm(p)
+        if any(k in n for k in keywords):
+            dropped.append(p)
+            after_drop = True
+            continue
+        # Sites sometimes insert their line in the middle of a paragraph, which leaves the
+        # closing quote alone on the next line: put it back at the end of the previous line.
+        if after_drop and kept and CLOSING_RE.match(p):
+            kept[-1] += p
+        else:
+            kept.append(p)
+        after_drop = False
+    return kept, dropped
+
+
 def parse_chapter(page_html, url, selector):
     soup = BeautifulSoup(page_html, "html.parser")
     next_url = find_next_url(soup, url)
@@ -419,14 +458,38 @@ def main():
     ap.add_argument("url", help="URL of the first chapter (or of the novel's index page)")
     ap.add_argument("-o", "--output", help="output .epub file (default: <novel-title>.epub)")
     ap.add_argument("-m", "--max", type=int, default=0, help="max number of chapters (0 = all)")
-    ap.add_argument("-d", "--delay", type=float, default=1.0, help="seconds between requests (default 1)")
+    ap.add_argument("--from", dest="start", type=int, default=0, metavar="N",
+                    help="first chapter number to put in the book (default: the first one found)")
+    ap.add_argument("--to", dest="end", type=int, default=0, metavar="N",
+                    help="last chapter number to put in the book (default: until the end)")
+    ap.add_argument("--split", type=int, default=0, metavar="N",
+                    help="write one EPUB file every N chapters (0 = a single file)")
+    ap.add_argument("-d", "--delay", type=float, default=0.1, help="seconds between requests (default 1)")
     ap.add_argument("--title", help="override the book title")
     ap.add_argument("--author", help="override the author")
     ap.add_argument("--selector", help="CSS selector of the chapter text, if auto-detect fails")
     ap.add_argument("--cache", help="cache folder (default: .cache/<novel-slug>)")
     ap.add_argument("--no-cache", action="store_true", help="always re-download chapters")
     ap.add_argument("--lang", default="vi", help="book language code (default vi)")
+    ap.add_argument("--ignore", help="file of keywords, one per line; any line of text containing "
+                                     "one is left out (default: ignore.md next to this script)")
+    ap.add_argument("--show-ignored", action="store_true", help="print every line that was left out")
     args = ap.parse_args()
+    if args.split < 0 or args.start < 0 or args.end < 0:
+        ap.error("--split, --from and --to must be positive numbers")
+    if args.end and args.start > args.end:
+        ap.error("--from must not be greater than --to")
+
+    def in_range(n):
+        return n >= args.start and (not args.end or n <= args.end)
+
+    ignore_path = Path(args.ignore) if args.ignore else Path(__file__).resolve().parent / "ignore.md"
+    if args.ignore and not ignore_path.exists():
+        sys.exit(f"Ignore file not found: {ignore_path}")
+    keywords = load_ignore(ignore_path)
+    if keywords:
+        print(f"[ignore] {len(keywords)} keywords from {ignore_path}")
+    total_ignored = 0
 
     fetcher = Fetcher(delay=args.delay)
     cache_dir = Path(args.cache or Path(".cache") / novel_prefix(args.url).strip("/").split("/")[-1])
@@ -456,10 +519,16 @@ def main():
         print(f"[toc] found {len(queue)} chapters")
         t, a = find_novel_info(index_soup, args.url)
         title, author = title or t, author or a
+        # Chapter number comes from the URL; if the URL has none, use the position in the list
+        numbers = {u: chapter_number(u) or pos for pos, u in enumerate(queue, 1)}
+        queue = [u for u in queue if in_range(numbers[u])]
+        if not queue:
+            sys.exit("No chapter in the --from/--to range.")
         url = queue[0]
 
     visited = set()
     i = 0
+    skipped = 0
     try:
         while url and url not in visited:
             visited.add(url)
@@ -470,8 +539,26 @@ def main():
                 break
             title = title or ch.get("novel_title")
             author = author or ch.get("novel_author")
+            ch["num"] = numbers[url] if queue is not None else (chapter_number(url) or i)
+            if queue is None and not in_range(ch["num"]):
+                if args.end and ch["num"] > args.end:
+                    break
+                # Before --from: only read to find the link to the next chapter
+                skipped += 1
+                if skipped == 1 or soup is not None:
+                    print(f"[{i}] chapter {ch['num']} is before --from {args.start}, skipping"
+                          f"{'' if soup is not None else ' (and the following ones)'}")
+                url = ch["next"]
+                continue
+            # Filter here (not before caching) so edits to the ignore file apply to cached chapters too
+            ch["paragraphs"], dropped = drop_ignored(ch["paragraphs"], keywords)
+            total_ignored += len(dropped)
             words = sum(len(p.split()) for p in ch["paragraphs"])
-            print(f"[{i}] {ch['title']}  ({words} words){'  [cache]' if soup is None else ''}")
+            print(f"[{i}] {ch['title']}  ({words} words){'  [cache]' if soup is None else ''}"
+                  f"{f'  [-{len(dropped)} ignored]' if dropped else ''}")
+            if args.show_ignored:
+                for p in dropped:
+                    print(f"   - {p[:150]}")
             if not ch["paragraphs"]:
                 print("   ! no text found - try --selector", file=sys.stderr)
             chapters.append(ch)
@@ -485,9 +572,25 @@ def main():
         sys.exit("Nothing downloaded.")
 
     title = title or "Novel"
-    out = Path(args.output or f"{slugify(title)}.epub")
-    write_epub(out, title, author, chapters, lang=args.lang, source=args.url)
-    print(f"\nDone: {out}  ({len(chapters)} chapters, title: {title!r}, author: {author or 'Unknown'})")
+    base = Path(args.output or f"{slugify(title)}.epub")
+    step = args.split or len(chapters)
+    parts = [chapters[k:k + step] for k in range(0, len(chapters), step)]
+    # Put the chapter range in the file name when splitting, or when only a range was asked for
+    # (so a partial book never overwrites the full one). A plain -o FILE is used as given.
+    ranged = bool(args.split) or (not args.output and (args.start > 1 or args.end))
+    print()
+    for part in parts:
+        a, b = part[0]["num"], part[-1]["num"]
+        if ranged:
+            out = base.with_name(f"{base.stem}-{a:04d}-{b:04d}.epub")
+            part_title = f"{title} ({a}-{b})"
+        else:
+            out, part_title = base, title
+        write_epub(out, part_title, author, part, lang=args.lang, source=args.url)
+        print(f"Done: {out}  ({len(part)} chapters)")
+    print(f"{len(chapters)} chapters in {len(parts)} file(s), title: {title!r}, author: {author or 'Unknown'}")
+    if total_ignored:
+        print(f"Ignored {total_ignored} lines matching {ignore_path.name} (use --show-ignored to list them)")
 
 
 if __name__ == "__main__":
